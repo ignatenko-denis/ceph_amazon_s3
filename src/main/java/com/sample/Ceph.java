@@ -11,27 +11,65 @@ import com.amazonaws.regions.Regions;
 import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.AmazonS3ClientBuilder;
 import com.amazonaws.services.s3.model.*;
+import lombok.NoArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
-import java.io.IOException;
 import java.net.URI;
-import java.nio.file.Files;
-import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.List;
 
+import static lombok.AccessLevel.PRIVATE;
+
 @Slf4j
-public class CephReader {
-    private static final String TMP_DIRECTORY_PREFIX = "ceph_temp_folder_";
+@NoArgsConstructor(access = PRIVATE)
+public class Ceph {
     private static final ZoneId ZONE = ZoneId.systemDefault();
     private static final LocalDateTime DEFAULT_DATE_TIME = LocalDateTime.of(1, 1, 1, 1, 1, 1);
 
-    public URI readLastFile(S3Config config) {
+    public static boolean writeFile(S3Config config, File file) {
+        // connection to the Ceph
+        AmazonS3 s3 = connect(config);
+        if (s3 == null) {
+            log.error("cannot connect to Ceph");
+            return false;
+        }
+
+        List<Bucket> buckets;
+
+        try {
+            buckets = s3.listBuckets();
+        } catch (Exception e) {
+            log.error("cannot connect to Ceph", e);
+            return false;
+        }
+
+        log.info("Ceph connection initiated!");
+
+        var bucket = foundBucketByName(buckets, config.getRootBucket());
+        if (bucket == null) {
+            log.error("Cannot read Bucket from Ceph");
+            return false;
+        }
+
+        log.info("start uploading file '{}' to Ceph...", file.getName());
+        try {
+            PutObjectRequest request = new PutObjectRequest(bucket.getName(), file.getName(), file);
+            s3.putObject(request);
+            log.info("uploading '{}' finished!", file.getName());
+        } catch (Exception e) {
+            log.error(String.format("Cannot upload file '%s' to Ceph", file.getName()), e);
+            return false;
+        }
+
+        return true;
+    }
+
+    public static URI readLastFile(S3Config config, File destinationDirectory) {
         // connection to the Ceph
         AmazonS3 s3 = connect(config);
         if (s3 == null) {
@@ -66,22 +104,15 @@ public class CephReader {
         }
         log.info("founded last modified file: {}", objectSummary.getKey());
 
-        // creating temporary local folder
-        var tmpDir = createTempDirectory();
-        if (tmpDir == null) {
-            log.error("Cannot create temporary local directory");
-            return null;
-        }
-
         // creating temporary local file
-        String tmpFileName = buildTempFileName(tmpDir, objectSummary.getKey());
+        String tmpFileName = buildTempFileName(destinationDirectory, objectSummary.getKey());
         var tmpFile = new File(tmpFileName);
         log.info("created temporary file: {}", tmpFile.toURI());
 
         log.info("start downloading File from Ceph...");
-        ObjectMetadata object = s3.getObject(
-                new GetObjectRequest(objectSummary.getBucketName(), objectSummary.getKey()), tmpFile);
-        log.info("File length: {} bytes", object.getContentLength());
+        GetObjectRequest request = new GetObjectRequest(objectSummary.getBucketName(), objectSummary.getKey());
+        ObjectMetadata object = s3.getObject(request, tmpFile);
+        log.info("Ceph file length: {} bytes", object.getContentLength());
         log.info("downloaded local file length: {} bytes", tmpFile.length());
 
         if (object.getContentLength() != tmpFile.length()) {
@@ -99,7 +130,7 @@ public class CephReader {
         return tmpFile.toURI();
     }
 
-    private AmazonS3 connect(S3Config s3Config) {
+    private static AmazonS3 connect(S3Config s3Config) {
         // Disable checking certification
         try {
             ClientConfiguration clientConfig = new ClientConfiguration();
@@ -132,7 +163,7 @@ public class CephReader {
                 .build();
     }
 
-    private Bucket foundBucketByName(List<Bucket> buckets, String bucketName) {
+    private static Bucket foundBucketByName(List<Bucket> buckets, String bucketName) {
         for (Bucket bucket : buckets) {
             if (bucket.getName().equals(bucketName)) {
                 return bucket;
@@ -142,7 +173,7 @@ public class CephReader {
         return null;
     }
 
-    private void printAllFiles(ObjectListing listing) {
+    private static void printAllFiles(ObjectListing listing) {
         List<S3ObjectSummary> objectSummaries = listing.getObjectSummaries();
         log.info("found '{}' files", objectSummaries.size());
 
@@ -152,7 +183,7 @@ public class CephReader {
         }
     }
 
-    private S3ObjectSummary foundLastObjectSummary(ObjectListing listing) {
+    private static S3ObjectSummary foundLastObjectSummary(ObjectListing listing) {
         var last = DEFAULT_DATE_TIME;
         S3ObjectSummary result = null;
 
@@ -168,19 +199,7 @@ public class CephReader {
         return result;
     }
 
-    private File createTempDirectory() {
-        try {
-            var permissions = PosixFilePermissions.fromString("rwxr--r--");
-            var attr = PosixFilePermissions.asFileAttribute(permissions);
-            return Files.createTempDirectory(TMP_DIRECTORY_PREFIX, attr).toFile();
-        } catch (IOException e) {
-            log.error("cannot create temp file", e);
-        }
-
-        return null;
-    }
-
-    private String buildTempFileName(File tmpDir, String fileName) {
+    private static String buildTempFileName(File tmpDir, String fileName) {
         return tmpDir.getPath() + File.separator + fileName;
     }
 
